@@ -1,10 +1,8 @@
 name: Advanced IPA Extraction & Reverse Engineering
 
 on:
-  # This forces the workflow to run automatically when you push to the main branch
   push:
     branches: [ main, master ]
-  # This keeps the manual button available in your Actions tab
   workflow_dispatch:
     inputs:
       ipa_url:
@@ -27,33 +25,28 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # ২. সমস্ত প্রয়োজনীয় টুলস ইনস্টল করা
+    # ২. সমস্ত প্রয়োজনীয় টুলস ইনস্টল করা (Updated to use dsdump)
     - name: Install Dependencies
       run: |
         echo "Installing workflow requirements..."
         brew install jq wget
         
-        # Download and install class-dump to a user-writable bin folder to avoid sudo issues
+        # Install dsdump (Modern replacement for class-dump)
         mkdir -p $HOME/bin
-        wget https://github.com/nst/class-dump/releases/download/v3.5/class-dump-3.5.tar.gz
-        tar -xzf class-dump-3.5.tar.gz
-        chmod +x class-dump
-        mv class-dump $HOME/bin/
+        wget https://github.com/derekselander/dsdump/releases/download/v0.2.1/dsdump.zip
+        unzip dsdump.zip -d $HOME/bin/
+        chmod +x $HOME/bin/dsdump
         echo "$HOME/bin" >> $GITHUB_PATH
 
     # ৩. IPA ফাইল ডাউনলোড করা
     - name: Download IPA File
       run: |
         # Fallback values if triggered by 'push' instead of manual 'workflow_dispatch'
-        IPA_URL="${{ github.event.inputs.ipa_url }}"
-        if [ -z "$IPA_URL" ]; then
-          IPA_URL="https://dl.iosvizor.net/assassins-creed-mirage/Assassins-Creed-Mirage-v1.3.0-iosvizor.ipa"
-        fi
+        user_url="${{ github.event.inputs.ipa_url }}"
+        IPA_URL="${user_url:-https://dl.iosvizor.net/assassins-creed-mirage/Assassins-Creed-Mirage-v1.3.0-iosvizor.ipa}"
         
-        APP_NAME="${{ github.event.inputs.app_name }}"
-        if [ -z "$APP_NAME" ]; then
-          APP_NAME="Assassins-Creed"
-        fi
+        user_name="${{ github.event.inputs.app_name }}"
+        APP_NAME="${user_name:-Assassins-Creed}"
         
         echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
         
@@ -122,10 +115,11 @@ jobs:
           # ক্লাস এবং মেথড নেম এক্সট্রাক্ট করা (Swift)
           strings "$BINARY" | grep -E "^_ZN|^_T0|Swift" > Binary_Analysis/swift_symbols.txt || true
           
-          # Objective-C ক্লাস তথ্য
-          if command -v class-dump &> /dev/null; then
-            echo "🔎 class-dump দিয়ে Objective-C ক্লাস এক্সট্রাক্ট করছি..."
-            class-dump "$BINARY" -o Binary_Analysis/objc_classes/ 2>/dev/null || true
+          # Modern Objective-C & Swift class-dumping using dsdump
+          if command -v dsdump &> /dev/null; then
+            echo "🔎 dsdump দিয়ে ক্লাস স্ট্রাকচার এক্সট্রাক্ট করছি..."
+            dsdump --objc "$BINARY" > Binary_Analysis/objc_classes.txt 2>/dev/null || true
+            dsdump --swift "$BINARY" > Binary_Analysis/swift_classes.txt 2>/dev/null || true
           fi
           
           # Native macOS tools
@@ -147,39 +141,29 @@ jobs:
         echo "📁 অ্যাসেটস এক্সট্রাক্ট করছি..."
         mkdir -p Assets_Resources
         
-        # ছবি কপি করা
         find "$APP_PATH" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" \) \
           -exec cp {} Assets_Resources/ \; 2>/dev/null || true
         
-        # JSON/PLIST ফাইল
         find "$APP_PATH" -type f \( -name "*.plist" -o -name "*.json" -o -name "*.xml" -o -name "*.strings" \) \
           -exec cp {} Assets_Resources/ \; 2>/dev/null || true
         
-        # Info.plist পার্স করা
         if [ -f "$APP_PATH/Info.plist" ]; then
           echo "📋 Info.plist পার্স করছি..."
           plutil -p "$APP_PATH/Info.plist" > Assets_Resources/Info_plist_parsed.txt 2>/dev/null || \
           cat "$APP_PATH/Info.plist" > Assets_Resources/Info_plist_raw.txt
         fi
         
-        # ফন্ট ফাইল
         find "$APP_PATH" -type f \( -name "*.ttf" -o -name "*.otf" \) \
           -exec cp {} Assets_Resources/ \; 2>/dev/null || true
-        
-        echo "✅ অ্যাসেটস সংগ্রহ সম্পন্ন"
-        ls -lh Assets_Resources/ | head -n 20
 
     # ৭. ডায়নামিক লিঙ্কিং তথ্য
     - name: Extract Dynamic Linking Info
       run: |
         cd extracted_source
-        
         mkdir -p Dynamic_Info
         BINARY=$(cat binary_path.txt)
         
         if [ -f "$BINARY" ]; then
-          echo "🔗 ডায়নামিক লিঙ্কিং তথ্য সংগ্রহ করছি..."
-          
           nm "$BINARY" > Dynamic_Info/all_symbols.txt 2>/dev/null || true
           nm -g "$BINARY" > Dynamic_Info/dynamic_symbols.txt 2>/dev/null || true
         fi
@@ -188,13 +172,10 @@ jobs:
     - name: Security Analysis
       run: |
         cd extracted_source
-        
         mkdir -p Security_Analysis
         BINARY=$(cat binary_path.txt)
         
         if [ -f "$BINARY" ]; then
-          echo "🔒 নিরাপত্তা বৈশিষ্ট্য বিশ্লেষণ করছি..."
-          
           otool -hv "$BINARY" > Security_Analysis/binary_headers.txt 2>/dev/null || true
           otool -l "$BINARY" | grep -A5 "LC_ENCRYPTION" > Security_Analysis/encryption_info.txt 2>/dev/null || true
           otool -l "$BINARY" | grep -A10 "LC_CODE_SIGNATURE" > Security_Analysis/code_signature.txt 2>/dev/null || true
@@ -233,16 +214,11 @@ jobs:
         echo "" >> ANALYSIS_REPORT.md
         echo "## স্ট্রিং বিশ্লেষণ" >> ANALYSIS_REPORT.md
         echo "মোট স্ট্রিং: $(wc -l < Binary_Analysis/all_strings.txt)" >> ANALYSIS_REPORT.md
-        
-        cat ANALYSIS_REPORT.md
 
     # ১০. সমস্ত ডেটা জিপ করা
     - name: Package All Data
       run: |
         cd extracted_source
-        
-        echo "📦 সমস্ত ডেটা প্যাকেজ করছি..."
-        
         zip -r ../binary_analysis.zip Binary_Analysis/ -q
         zip -r ../assets_resources.zip Assets_Resources/ -q
         zip -r ../dynamic_info.zip Dynamic_Info/ -q
@@ -250,9 +226,7 @@ jobs:
         zip -r ../full_extraction.zip . -q
         
         cp ANALYSIS_REPORT.md ../
-        
         cd ..
-        ls -lh *.zip ANALYSIS_REPORT.md
 
     # ১১. GitHub Artifacts এ আপলোড করা
     - name: Upload Artifacts
@@ -275,16 +249,6 @@ jobs:
       run: |
         cat > summary.txt << EOF
         ✅ iOS IPA বিশ্লেষণ সম্পন্ন হয়েছে
-        
-        📊 এক্সট্রাক্ট করা ডেটা:
-        - বাইনারি বিশ্লেষণ
-        - API এন্ডপয়েন্ট
-        - Objective-C ক্লাস তথ্য
-        - অ্যাসেটস এবং রিসোর্স
-        - নিরাপত্তা বৈশিষ্ট্য
-        - ডায়নামিক লিঙ্কিং তথ্য
-        - সিম্বল টেবিল
-        
         📥 ডাউনলোড করুন: Artifacts থেকে
         EOF
         cat summary.txt
