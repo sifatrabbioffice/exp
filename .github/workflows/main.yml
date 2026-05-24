@@ -16,7 +16,6 @@ on:
 
 jobs:
   extract-and-analyze:
-    # Switched to macOS runner to natively support Mach-O binary tools
     runs-on: macos-latest
 
     steps:
@@ -28,15 +27,15 @@ jobs:
     - name: Install Dependencies
       run: |
         echo "Installing workflow requirements..."
-        # macOS comes with unzip, file, python3, and git pre-installed via Xcode tools.
-        # Installing additional dependencies via Homebrew
         brew install jq wget
         
-        # Download and install class-dump (macOS native utility)
+        # Download and install class-dump to a user-writable bin folder to avoid sudo issues
+        mkdir -p $HOME/bin
         wget https://github.com/nst/class-dump/releases/download/v3.5/class-dump-3.5.tar.gz
         tar -xzf class-dump-3.5.tar.gz
         chmod +x class-dump
-        sudo cp class-dump /usr/local/bin/
+        mv class-dump $HOME/bin/
+        echo "$HOME/bin" >> $GITHUB_PATH
 
     # ৩. IPA ফাইল ডাউনলোড করা
     - name: Download IPA File
@@ -106,13 +105,13 @@ jobs:
           # ক্লাস এবং মেথড নেম এক্সট্রাক্ট করা (Swift)
           strings "$BINARY" | grep -E "^_ZN|^_T0|Swift" > Binary_Analysis/swift_symbols.txt || true
           
-          # Objective-C ক্লাস তথ্য (Natively supported on macOS)
+          # Objective-C ক্লাস তথ্য
           if command -v class-dump &> /dev/null; then
             echo "🔎 class-dump দিয়ে Objective-C ক্লাস এক্সট্রাক্ট করছি..."
             class-dump "$BINARY" -o Binary_Analysis/objc_classes/ 2>/dev/null || true
           fi
           
-          # Native macOS tools for Mach-O binaries
+          # Native macOS tools
           objdump -d "$BINARY" > Binary_Analysis/objdump_disassembly.txt 2>/dev/null || true
           
           # Native otool mapping
@@ -139,7 +138,7 @@ jobs:
         find "$APP_PATH" -type f \( -name "*.plist" -o -name "*.json" -o -name "*.xml" -o -name "*.strings" \) \
           -exec cp {} Assets_Resources/ \; 2>/dev/null || true
         
-        # Info.plist পার্স করা (Using native macOS plutil command)
+        # Info.plist পার্স করা
         if [ -f "$APP_PATH/Info.plist" ]; then
           echo "📋 Info.plist পার্স করছি..."
           plutil -p "$APP_PATH/Info.plist" > Assets_Resources/Info_plist_parsed.txt 2>/dev/null || \
@@ -164,7 +163,6 @@ jobs:
         if [ -f "$BINARY" ]; then
           echo "🔗 ডায়নামিক লিঙ্কিং তথ্য সংগ্রহ করছি..."
           
-          # macOS nm properties
           nm "$BINARY" > Dynamic_Info/all_symbols.txt 2>/dev/null || true
           nm -g "$BINARY" > Dynamic_Info/dynamic_symbols.txt 2>/dev/null || true
         fi
@@ -180,13 +178,8 @@ jobs:
         if [ -f "$BINARY" ]; then
           echo "🔒 নিরাপত্তা বৈশিষ্ট্য বিশ্লেষণ করছি..."
           
-          # ASLR, PIE, Stack Canary চেক করা
           otool -hv "$BINARY" > Security_Analysis/binary_headers.txt 2>/dev/null || true
-          
-          # Encryption তথ্য
           otool -l "$BINARY" | grep -A5 "LC_ENCRYPTION" > Security_Analysis/encryption_info.txt 2>/dev/null || true
-          
-          # Code Signature
           otool -l "$BINARY" | grep -A10 "LC_CODE_SIGNATURE" > Security_Analysis/code_signature.txt 2>/dev/null || true
         fi
 
@@ -233,14 +226,12 @@ jobs:
         
         echo "📦 সমস্ত ডেটা প্যাকেজ করছি..."
         
-        # প্রতিটি ক্যাটাগরির জন্য সংরক্ষণাগার তৈরি করা
         zip -r ../binary_analysis.zip Binary_Analysis/ -q
         zip -r ../assets_resources.zip Assets_Resources/ -q
         zip -r ../dynamic_info.zip Dynamic_Info/ -q
         zip -r ../security_analysis.zip Security_Analysis/ -q
         zip -r ../full_extraction.zip . -q
         
-        # রিপোর্ট আলাদাভাবে সংরক্ষণ করা
         cp ANALYSIS_REPORT.md ../
         
         cd ..
