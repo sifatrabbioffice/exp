@@ -9,7 +9,7 @@ on:
         description: 'IPA URL'
         required: true
         type: string
-        default: 'https://dl.iosvizor.net/assassins-creed-mirage/Assassins-Creed-Mirage-v1.3.0-iosvizor.ipa'
+        default: 'https://dl.iosvizor.net/resident-evil-4/resident-evil-4-v1.0.5-iosvizor.ipa'
       app_name:
         description: 'অ্যাপ্লিকেশনের নাম'
         required: true
