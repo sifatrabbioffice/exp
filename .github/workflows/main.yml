@@ -39,10 +39,10 @@ jobs:
     - name: Download IPA File
       run: |
         user_url="${{ github.event.inputs.ipa_url }}"
-        IPA_URL="${user_url:-https://dl.iosvizor.net/assassins-creed-mirage/Assassins-Creed-Mirage-v1.3.0-iosvizor.ipa}"
+        IPA_URL="${user_url:-https://dl.iosvizor.net/resident-evil-4/resident-evil-4-v1.0.5-iosvizor.ipa}"
         
         user_name="${{ github.event.inputs.app_name }}"
-        APP_NAME="${user_name:-Assassins-Creed}"
+        APP_NAME="${user_name:-Resident-Evil-4}"
         
         echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
         
