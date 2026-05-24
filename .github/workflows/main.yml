@@ -1,0 +1,282 @@
+name: Advanced IPA Extraction & Reverse Engineering
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'IPA URL'
+        required: true
+        type: string
+        default: 'https://dl.iosvizor.net/assassins-creed-mirage/Assassins-Creed-Mirage-v1.3.0-iosvizor.ipa'
+      app_name:
+        description: 'অ্যাপ্লিকেশনের নাম'
+        required: true
+        type: string
+        default: 'Assassins-Creed'
+
+jobs:
+  extract-and-analyze:
+    # Switched to macOS runner to natively support Mach-O binary tools
+    runs-on: macos-latest
+
+    steps:
+    # ১. রিপোজিটরি চেকআউট
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # ২. সমস্ত প্রয়োজনীয় টুলস ইনস্টল করা
+    - name: Install Dependencies
+      run: |
+        echo "Installing workflow requirements..."
+        # macOS comes with unzip, file, python3, and git pre-installed via Xcode tools.
+        # Installing additional dependencies via Homebrew
+        brew install jq wget
+        
+        # Download and install class-dump (macOS native utility)
+        wget https://github.com/nst/class-dump/releases/download/v3.5/class-dump-3.5.tar.gz
+        tar -xzf class-dump-3.5.tar.gz
+        chmod +x class-dump
+        sudo cp class-dump /usr/local/bin/
+
+    # ৩. IPA ফাইল ডাউনলোড করা
+    - name: Download IPA File
+      run: |
+        echo "📥 IPA ডাউনলোড করছি: ${{ github.event.inputs.ipa_url }}"
+        curl -L "${{ github.event.inputs.ipa_url }}" -o "${{ github.event.inputs.app_name }}.ipa" \
+          --progress-bar \
+          --max-time 600
+        
+        if [ ! -f "${{ github.event.inputs.app_name }}.ipa" ]; then
+          echo "❌ ডাউনলোড ব্যর্থ হয়েছে"
+          exit 1
+        fi
+        
+        ls -lh "${{ github.event.inputs.app_name }}.ipa"
+
+    # ৪. IPA কাঠামো বিশ্লেষণ
+    - name: Analyze IPA Structure
+      run: |
+        mkdir -p extracted_source
+        cd extracted_source
+        
+        echo "📦 IPA স্ট্রাকচার বিশ্লেষণ করছি..."
+        unzip -l "../${{ github.event.inputs.app_name }}.ipa" > ipa_structure.txt
+        
+        # IPA এক্সট্রাক্ট করা
+        unzip -q "../${{ github.event.inputs.app_name }}.ipa" -d . || true
+        
+        # .app ফোল্ডার খোঁজা
+        APP_PATH=$(find Payload -maxdepth 2 -name "*.app" -type d | head -n 1)
+        echo "✅ অ্যাপ পাথ: $APP_PATH"
+        echo "$APP_PATH" > app_path.txt
+        
+        # Payload কাঠামো সংরক্ষণ করা
+        find Payload -type f -exec ls -lh {} \; > file_structure.txt
+
+    # ৫. বাইনারি এক্সট্রাকশন এবং বিশ্লেষণ
+    - name: Extract Binary Information
+      run: |
+        cd extracted_source
+        APP_PATH=$(cat app_path.txt)
+        
+        # বাইনারি খোঁজা
+        BINARY=$(find "$APP_PATH" -maxdepth 1 -type f ! -name "*.plist" -executable | head -n 1)
+        
+        if [ -z "$BINARY" ]; then
+          BINARY=$(find "$APP_PATH" -maxdepth 1 -type f ! -name "*.plist" ! -name ".*" | head -n 1)
+        fi
+        
+        echo "🔍 বাইনারি পাথ: $BINARY"
+        echo "$BINARY" > binary_path.txt
+        
+        mkdir -p Binary_Analysis
+        
+        if [ -f "$BINARY" ]; then
+          echo "📊 বাইনারি তথ্য সংগ্রহ করছি..."
+          
+          # বাইনারি তথ্য
+          file "$BINARY" > Binary_Analysis/binary_info.txt
+          
+          # সমস্ত টেক্সট স্ট্রিং এক্সট্রাক্ট করা
+          strings "$BINARY" > Binary_Analysis/all_strings.txt
+          
+          # API এন্ডপয়েন্ট খোঁজা
+          strings "$BINARY" | grep -E "https?://|api|\.com|\.net|endpoint" > Binary_Analysis/api_endpoints.txt || true
+          
+          # ক্লাস এবং মেথড নেম এক্সট্রাক্ট করা (Swift)
+          strings "$BINARY" | grep -E "^_ZN|^_T0|Swift" > Binary_Analysis/swift_symbols.txt || true
+          
+          # Objective-C ক্লাস তথ্য (Natively supported on macOS)
+          if command -v class-dump &> /dev/null; then
+            echo "🔎 class-dump দিয়ে Objective-C ক্লাস এক্সট্রাক্ট করছি..."
+            class-dump "$BINARY" -o Binary_Analysis/objc_classes/ 2>/dev/null || true
+          fi
+          
+          # Native macOS tools for Mach-O binaries
+          objdump -d "$BINARY" > Binary_Analysis/objdump_disassembly.txt 2>/dev/null || true
+          
+          # Native otool mapping
+          otool -L "$BINARY" > Binary_Analysis/linked_libraries.txt 2>/dev/null || true
+          otool -l "$BINARY" | head -n 50 > Binary_Analysis/load_commands.txt 2>/dev/null || true
+        else
+          echo "⚠️  বাইনারি খুঁজে পাওয়া যায়নি"
+        fi
+
+    # ৬. অ্যাসেটস এবং রিসোর্স এক্সট্রাকশন
+    - name: Extract Assets and Resources
+      run: |
+        cd extracted_source
+        APP_PATH=$(cat app_path.txt)
+        
+        echo "📁 অ্যাসেটস এক্সট্রাক্ট করছি..."
+        mkdir -p Assets_Resources
+        
+        # ছবি কপি করা
+        find "$APP_PATH" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" \) \
+          -exec cp {} Assets_Resources/ \; 2>/dev/null || true
+        
+        # JSON/PLIST ফাইল
+        find "$APP_PATH" -type f \( -name "*.plist" -o -name "*.json" -o -name "*.xml" -o -name "*.strings" \) \
+          -exec cp {} Assets_Resources/ \; 2>/dev/null || true
+        
+        # Info.plist পার্স করা (Using native macOS plutil command)
+        if [ -f "$APP_PATH/Info.plist" ]; then
+          echo "📋 Info.plist পার্স করছি..."
+          plutil -p "$APP_PATH/Info.plist" > Assets_Resources/Info_plist_parsed.txt 2>/dev/null || \
+          cat "$APP_PATH/Info.plist" > Assets_Resources/Info_plist_raw.txt
+        fi
+        
+        # ফন্ট ফাইল
+        find "$APP_PATH" -type f \( -name "*.ttf" -o -name "*.otf" \) \
+          -exec cp {} Assets_Resources/ \; 2>/dev/null || true
+        
+        echo "✅ অ্যাসেটস সংগ্রহ সম্পন্ন"
+        ls -lh Assets_Resources/ | head -n 20
+
+    # ৭. ডায়নামিক লিঙ্কিং তথ্য
+    - name: Extract Dynamic Linking Info
+      run: |
+        cd extracted_source
+        
+        mkdir -p Dynamic_Info
+        BINARY=$(cat binary_path.txt)
+        
+        if [ -f "$BINARY" ]; then
+          echo "🔗 ডায়নামিক লিঙ্কিং তথ্য সংগ্রহ করছি..."
+          
+          # macOS nm properties
+          nm "$BINARY" > Dynamic_Info/all_symbols.txt 2>/dev/null || true
+          nm -g "$BINARY" > Dynamic_Info/dynamic_symbols.txt 2>/dev/null || true
+        fi
+
+    # ৮. নিরাপত্তা বিশ্লেষণ
+    - name: Security Analysis
+      run: |
+        cd extracted_source
+        
+        mkdir -p Security_Analysis
+        BINARY=$(cat binary_path.txt)
+        
+        if [ -f "$BINARY" ]; then
+          echo "🔒 নিরাপত্তা বৈশিষ্ট্য বিশ্লেষণ করছি..."
+          
+          # ASLR, PIE, Stack Canary চেক করা
+          otool -hv "$BINARY" > Security_Analysis/binary_headers.txt 2>/dev/null || true
+          
+          # Encryption তথ্য
+          otool -l "$BINARY" | grep -A5 "LC_ENCRYPTION" > Security_Analysis/encryption_info.txt 2>/dev/null || true
+          
+          # Code Signature
+          otool -l "$BINARY" | grep -A10 "LC_CODE_SIGNATURE" > Security_Analysis/code_signature.txt 2>/dev/null || true
+        fi
+
+    # ৯. রিপোর্ট জেনারেশন
+    - name: Generate Analysis Report
+      run: |
+        cd extracted_source
+        
+        cat > ANALYSIS_REPORT.md << 'EOF'
+        # iOS IPA বিশ্লেষণ রিপোর্ট
+        
+        ## অ্যাপ্লিকেশন তথ্য
+        EOF
+        
+        echo "**অ্যাপ নাম:** ${{ github.event.inputs.app_name }}" >> ANALYSIS_REPORT.md
+        echo "**বিশ্লেষণ তারিখ:** $(date)" >> ANALYSIS_REPORT.md
+        echo "" >> ANALYSIS_REPORT.md
+        
+        echo "## বাইনারি তথ্য" >> ANALYSIS_REPORT.md
+        if [ -f "Binary_Analysis/binary_info.txt" ]; then
+          echo '```' >> ANALYSIS_REPORT.md
+          cat "Binary_Analysis/binary_info.txt" >> ANALYSIS_REPORT.md
+          echo '```' >> ANALYSIS_REPORT.md
+        fi
+        
+        echo "" >> ANALYSIS_REPORT.md
+        echo "## সনাক্ত করা API এন্ডপয়েন্ট" >> ANALYSIS_REPORT.md
+        if [ -f "Binary_Analysis/api_endpoints.txt" ]; then
+          echo '```' >> ANALYSIS_REPORT.md
+          head -n 50 "Binary_Analysis/api_endpoints.txt" >> ANALYSIS_REPORT.md
+          echo '```' >> ANALYSIS_REPORT.md
+        fi
+        
+        echo "" >> ANALYSIS_REPORT.md
+        echo "## স্ট্রিং বিশ্লেষণ" >> ANALYSIS_REPORT.md
+        echo "মোট স্ট্রিং: $(wc -l < Binary_Analysis/all_strings.txt)" >> ANALYSIS_REPORT.md
+        
+        cat ANALYSIS_REPORT.md
+
+    # ১০. সমস্ত ডেটা জিপ করা
+    - name: Package All Data
+      run: |
+        cd extracted_source
+        
+        echo "📦 সমস্ত ডেটা প্যাকেজ করছি..."
+        
+        # প্রতিটি ক্যাটাগরির জন্য সংরক্ষণাগার তৈরি করা
+        zip -r ../binary_analysis.zip Binary_Analysis/ -q
+        zip -r ../assets_resources.zip Assets_Resources/ -q
+        zip -r ../dynamic_info.zip Dynamic_Info/ -q
+        zip -r ../security_analysis.zip Security_Analysis/ -q
+        zip -r ../full_extraction.zip . -q
+        
+        # রিপোর্ট আলাদাভাবে সংরক্ষণ করা
+        cp ANALYSIS_REPORT.md ../
+        
+        cd ..
+        ls -lh *.zip ANALYSIS_REPORT.md
+
+    # ১১. GitHub Artifacts এ আপলোড করা
+    - name: Upload Artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: IPA-Analysis-Complete-${{ github.event.inputs.app_name }}
+        path: |
+          binary_analysis.zip
+          assets_resources.zip
+          dynamic_info.zip
+          security_analysis.zip
+          ANALYSIS_REPORT.md
+        retention-days: 14
+        compression-level: 9
+
+    # ১২. সারসংক্ষেপ তৈরি করা
+    - name: Create Summary
+      if: always()
+      run: |
+        cat > summary.txt << EOF
+        ✅ iOS IPA বিশ্লেষণ সম্পন্ন হয়েছে
+        
+        📊 এক্সট্রাক্ট করা ডেটা:
+        - বাইনারি বিশ্লেষণ
+        - API এন্ডপয়েন্ট
+        - Objective-C ক্লাস তথ্য
+        - অ্যাসেটস এবং রিসোর্স
+        - নিরাপত্তা বৈশিষ্ট্য
+        - ডায়নামিক লিঙ্কিং তথ্য
+        - সিম্বল টেবিল
+        
+        📥 ডাউনলোড করুন: Artifacts থেকে
+        EOF
+        cat summary.txt
